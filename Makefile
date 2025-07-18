@@ -38,6 +38,8 @@ DATA		:=	data
 INCLUDES	:=	include
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
+APP_AUTHOR  :=  CrazyKitty357
+APP_DESCRIPTION  :=  A bitmap to jpg converter for 3DS!
 #ROMFS		:=	romfs
 #GFXBUILD	:=	$(ROMFS)/gfx
 
