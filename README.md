@@ -1,5 +1,5 @@
 # bmp2jpg-3DS
-a 3ds homebrew application for converting bitmaps to jpgs
+a 3ds homebrew application for converting bitmaps to jpgs  
 **New3DS systems are currently untested so milage may vary**
 
 # Usage
