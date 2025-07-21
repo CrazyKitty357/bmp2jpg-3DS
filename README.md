@@ -34,5 +34,5 @@ a 3ds homebrew application for converting bitmaps to jpgs
 - [ ] re-add light mode
 
 # Known Bugs
-- [x] the screen being very dim  
+- [x] ~~the screen being very dim~~  
     ~~workaround: turn brightness to max~~
