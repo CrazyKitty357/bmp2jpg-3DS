@@ -1,4 +1,5 @@
 build/
+romfs/
 bmp2jpg.3dsx
 bmp2jpg.elf
 bmp2jpg.smdh
