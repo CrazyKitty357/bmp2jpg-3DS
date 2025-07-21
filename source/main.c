@@ -3,8 +3,6 @@
 #include <string.h>
 #include <dirent.h>
 #include <3ds.h>
-#include <citro2d.h>
-
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -13,37 +11,38 @@
 
 #define MAX_FILES 256
 #define MAX_FILENAME_LEN 256
-#define TOP_SCREEN_WIDTH 400
-#define BOTTOM_SCREEN_WIDTH 320
+#define TOP_SCREEN_ROWS 30
+#define TOP_SCREEN_COLS 50
+#define BOTTOM_SCREEN_ROWS 30
+#define BOTTOM_SCREEN_COLS 40
+#define REPEAT_START_DELAY 500
+#define REPEAT_CONTINUE_DELAY 100
 
 typedef struct {
     char name[MAX_FILENAME_LEN];
     bool is_dir;
 } FileEntry;
 
+static PrintConsole topScreen, bottomScreen;
 static FileEntry file_list[MAX_FILES];
 static int file_count = 0;
 static int cursor = 0;
 static int scroll_offset = 0;
 static char current_path[1024] = "sdmc:/";
-static C3D_RenderTarget* top;
-static C3D_RenderTarget* bottom;
-static C2D_TextBuf g_text_buf;
-static C2D_Text g_file_text[20];
 
 void populate_file_list();
 void draw_ui();
-bool handle_input();
+bool handle_action_keys(u32 kDown);
+void move_cursor(int direction);
 bool convert_image(const char* input_path);
 void show_message(const char* message, bool wait_for_key);
+int compare_files(const void* a, const void* b);
 
 int compare_files(const void* a, const void* b) {
     FileEntry* fa = (FileEntry*)a;
     FileEntry* fb = (FileEntry*)b;
-
     if (fa->is_dir && !fb->is_dir) return -1;
     if (!fa->is_dir && fb->is_dir) return 1;
-
     return strcasecmp(fa->name, fb->name);
 }
 
@@ -64,13 +63,10 @@ void populate_file_list() {
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL && file_count < MAX_FILES) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
         bool is_dir = (entry->d_type == DT_DIR);
         const char* ext = strrchr(entry->d_name, '.');
-
         if (is_dir || (ext && strcasecmp(ext, ".bmp") == 0)) {
             strncpy(file_list[file_count].name, entry->d_name, MAX_FILENAME_LEN - 1);
             file_list[file_count].name[MAX_FILENAME_LEN - 1] = '\0';
@@ -83,101 +79,57 @@ void populate_file_list() {
     if (file_count > 0) {
         qsort(file_list, file_count, sizeof(FileEntry), compare_files);
     }
-
     cursor = 0;
     scroll_offset = 0;
 }
 
 void draw_ui() {
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    C2D_TargetClear(top, C2D_Color32(0x1E, 0x1E, 0x1E, 0xFF));
-    C2D_SceneBegin(top);
+    consoleClear();
 
-    C2D_TextBufClear(g_text_buf);
-    C2D_TextParse(&g_file_text[0], g_text_buf, "BMP to JPG Converter (Old 3DS Optimized)");
-    C2D_TextOptimize(&g_file_text[0]);
-    C2D_DrawText(&g_file_text[0], C2D_AlignCenter, 10.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+    consoleSelect(&topScreen);
+    printf("\x1b[2;11H-- BMP to JPG Converter --");
+    printf("\x1b[4;3HSelect a .bmp file to convert it to .jpg");
+    printf("\x1b[5;8Hin the same folder.");
+    printf("\x1b[28;1H(A) Select | (B) Back/Up | (START) Exit");
 
-    C2D_TextBufClear(g_text_buf);
-    C2D_TextParse(&g_file_text[0], g_text_buf, "D-Pad: Navigate | (A) Select | (B) Back | START: Exit");
-    C2D_TextOptimize(&g_file_text[0]);
-    C2D_DrawText(&g_file_text[0], C2D_AlignLeft | C2D_AtBaseline, 8.0f, 220.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+    consoleSelect(&bottomScreen);
+    printf("\x1b[1;1HCurrent: %.32s", current_path);
 
-    C2D_TextBufClear(g_text_buf);
-    C2D_TextParse(&g_file_text[0], g_text_buf, "Select a .bmp file to convert it to .jpg in the same folder.");
-    C2D_TextOptimize(&g_file_text[0]);
-    C2D_DrawText(&g_file_text[0], C2D_AlignLeft | C2D_AtBaseline, 8.0f, 40.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
-
-    C2D_TargetClear(bottom, C2D_Color32(0x33, 0x33, 0x33, 0xFF));
-    C2D_SceneBegin(bottom);
-
-    C2D_TextBufClear(g_text_buf);
-    char display_path[60];
-    snprintf(display_path, 60, "Current: %s", current_path);
-    C2D_TextParse(&g_file_text[0], g_text_buf, display_path);
-    C2D_TextOptimize(&g_file_text[0]);
-    C2D_DrawText(&g_file_text[0], C2D_AlignLeft, 5.0f, 5.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xCC, 0x00, 0xFF));
-
-    int max_visible_items = 12;
+    int max_visible_items = BOTTOM_SCREEN_ROWS - 3;
     for (int i = 0; i < max_visible_items; i++) {
         int index = scroll_offset + i;
         if (index >= file_count) break;
+        printf("\x1b[%d;1H", 3 + i);
 
-        u32 color = C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF);
-        if (file_list[index].is_dir) {
-            color = C2D_Color32(0x7F, 0xC4, 0xEB, 0xFF);
-        }
-        if (index == cursor) {
-            color = C2D_Color32(0x00, 0xFF, 0x00, 0xFF);
-        }
+        if (index == cursor) printf("\x1b[32m> ");
+        else printf("  ");
 
-        C2D_TextBufClear(g_text_buf);
-        C2D_TextParse(&g_file_text[i], g_text_buf, file_list[index].name);
-        C2D_TextOptimize(&g_file_text[i]);
-        C2D_DrawText(&g_file_text[i], C2D_AlignLeft, 25.0f + (index == cursor ? 10.0f : 0.0f), 30.0f + (i * 15.0f), 0.5f, 0.5f, 0.5f, color);
+        if (file_list[index].is_dir) printf("\x1b[34m%s\x1b[0m", file_list[index].name);
+        else printf("\x1b[37m%s\x1b[0m", file_list[index].name);
     }
-     if (cursor >= 0 && cursor < file_count) {
-         C2D_TextBufClear(g_text_buf);
-         C2D_TextParse(&g_file_text[19], g_text_buf, ">");
-         C2D_TextOptimize(&g_file_text[19]);
-         C2D_DrawText(&g_file_text[19], C2D_AlignLeft, 15.0f, 30.0f + ((cursor - scroll_offset) * 15.0f), 0.5f, 0.5f, 0.5f, C2D_Color32(0x00, 0xFF, 0x00, 0xFF));
-     }
-    C3D_FrameEnd(0);
 }
 
-bool handle_input() {
-    hidScanInput();
-    u32 kDown = hidKeysDown();
+void move_cursor(int direction) {
+    if (file_count == 0) return;
 
-    if (kDown & KEY_START) {
-        return true;
-    }
+    cursor += direction;
 
-    if (kDown & KEY_DOWN) {
-        cursor++;
-        if (cursor >= file_count) {
-            cursor = 0;
-        }
-    }
-    if (kDown & KEY_UP) {
-        cursor--;
-        if (cursor < 0) {
-            cursor = file_count > 0 ? file_count - 1 : 0;
-        }
-    }
+    if (cursor >= file_count) cursor = 0;
+    if (cursor < 0) cursor = file_count - 1;
 
-    int max_visible_items = 12;
+    int max_visible_items = BOTTOM_SCREEN_ROWS - 3;
     if (cursor < scroll_offset) {
         scroll_offset = cursor;
     }
     if (cursor >= scroll_offset + max_visible_items) {
         scroll_offset = cursor - max_visible_items + 1;
     }
+}
 
+bool handle_action_keys(u32 kDown) {
     if (kDown & KEY_A) {
         if (file_count > 0 && cursor >= 0 && cursor < file_count) {
             FileEntry selected = file_list[cursor];
-            
             if (selected.is_dir) {
                 if (strcmp(selected.name, "..") == 0) {
                     char* last_slash = strrchr(current_path, '/');
@@ -190,13 +142,11 @@ bool handle_input() {
                     strcat(current_path, selected.name);
                     strcat(current_path, "/");
                 }
-                populate_file_list();
+                return true;
             } else {
                 char full_path[1024];
                 snprintf(full_path, sizeof(full_path), "%s%s", current_path, selected.name);
-                if (convert_image(full_path)) {
-                    return true;
-                }
+                convert_image(full_path);
             }
         }
     }
@@ -209,7 +159,7 @@ bool handle_input() {
                   last_slash = strrchr(current_path, '/');
                   *(last_slash + 1) = '\0';
              }
-             populate_file_list();
+             return true;
         }
     }
 
@@ -218,10 +168,8 @@ bool handle_input() {
 
 bool convert_image(const char* input_path) {
     show_message("Processing... Please wait.", false);
-
     int width, height, bpp;
     unsigned char* bmp_data = stbi_load(input_path, &width, &height, &bpp, 3);
-
     if (!bmp_data) {
         show_message("Error: Failed to load BMP!", true);
         return false;
@@ -230,43 +178,33 @@ bool convert_image(const char* input_path) {
     char output_path[1024];
     strcpy(output_path, input_path);
     char* ext = strrchr(output_path, '.');
-    if (ext) {
-        strcpy(ext, ".jpg");
-    } else {
-        strcat(output_path, ".jpg");
-    }
+    if (ext) strcpy(ext, ".jpg");
+    else strcat(output_path, ".jpg");
 
     int success = stbi_write_jpg(output_path, width, height, 3, bmp_data, 85);
-
     stbi_image_free(bmp_data);
 
     if (!success) {
         show_message("Error: Failed to write JPG.", true);
         return false;
     }
-
+    show_message("Conversion successful!", true);
     return true;
 }
 
 void show_message(const char* message, bool wait_for_key) {
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    C2D_TargetClear(top, C2D_Color32(0x1E, 0x1E, 0x1E, 0xFF));
-    C2D_SceneBegin(top);
+    consoleClear();
+    consoleSelect(&topScreen);
+    int msg_len = strlen(message);
+    int col = (TOP_SCREEN_COLS - msg_len) / 2;
+    printf("\x1b[14;%dH%s", col > 0 ? col : 1, message);
 
-    C2D_TextBufClear(g_text_buf);
-    C2D_TextParse(&g_file_text[0], g_text_buf, message);
-    C2D_TextOptimize(&g_file_text[0]);
-    C2D_DrawText(&g_file_text[0], C2D_AlignCenter, 120.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
-
-    if (wait_for_key) {
-        C2D_TextBufClear(g_text_buf);
-        C2D_TextParse(&g_file_text[1], g_text_buf, "Press (A) to continue.");
-        C2D_TextOptimize(&g_file_text[1]);
-        C2D_DrawText(&g_file_text[1], C2D_AlignCenter, 160.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
-    }
-
-    C3D_FrameEnd(0);
+    if (wait_for_key) printf("\x1b[16;16HPress (A) to continue.");
     
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+    gspWaitForVBlank();
+
     if (wait_for_key) {
         while (aptMainLoop()) {
             hidScanInput();
@@ -274,35 +212,72 @@ void show_message(const char* message, bool wait_for_key) {
             gspWaitForVBlank();
         }
     } else {
-        gspWaitForVBlank();
+        svcSleepThread(1000000000);
     }
 }
 
 int main(int argc, char* argv[]) {
     gfxInitDefault();
-    C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-    C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
-    C2D_Prepare();
+    consoleInit(GFX_TOP, &topScreen);
+    consoleInit(GFX_BOTTOM, &bottomScreen);
 
-    top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-    bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-    g_text_buf = C2D_TextBufNew(4096);
     populate_file_list();
 
+    bool needs_redraw = true;
+
+    u64 repeat_timer = 0;
+    u32 repeating_key = 0;
+
     while (aptMainLoop()) {
+        hidScanInput();
+
+        u32 kDown = hidKeysDown();
+        u32 kHeld = hidKeysHeld();
+        u32 kUp = hidKeysUp();
+
+        if (kDown & KEY_START) break;
+
+        if (kDown & (KEY_UP | KEY_DOWN)) {
+            if (kDown & KEY_UP) move_cursor(-1);
+            if (kDown & KEY_DOWN) move_cursor(1);
+            
+            repeating_key = kDown & (KEY_UP | KEY_DOWN);
+            repeat_timer = osGetTime() + REPEAT_START_DELAY;
+            needs_redraw = true;
+        }
         
-        if (handle_input()) {
-            break; 
+        if (repeating_key && (kHeld & repeating_key)) {
+            if (osGetTime() > repeat_timer) {
+                if (kHeld & KEY_UP) move_cursor(-1);
+                if (kHeld & KEY_DOWN) move_cursor(1);
+                
+                repeat_timer = osGetTime() + REPEAT_CONTINUE_DELAY;
+                needs_redraw = true;
+            }
         }
 
-        draw_ui();
+        if (kUp & repeating_key) {
+            repeating_key = 0;
+            repeat_timer = 0;
+        }
+
+        if (handle_action_keys(kDown)) {
+            populate_file_list();
+            needs_redraw = true;
+        } else if (kDown & (KEY_A | KEY_B)) {
+            needs_redraw = true;
+        }
+
+        if (needs_redraw) {
+            draw_ui();
+            needs_redraw = false;
+        }
         
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        gspWaitForVBlank();
     }
 
-    C2D_TextBufDelete(g_text_buf);
-    C2D_Fini();
-    C3D_Fini();
     gfxExit();
-
     return 0;
 }
